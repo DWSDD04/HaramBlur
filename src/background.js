@@ -1,4 +1,5 @@
-// when installed or updated load settings
+// background.js
+// Fixed: Prevents "Only a single offscreen document may be created" error
 
 const defaultSettings = {
     status: true,
@@ -11,7 +12,7 @@ const defaultSettings = {
     unblurImages: false,
     unblurVideos: false,
     gray: true,
-    strictness: 0.5, // goes from 0 to 1,
+    strictness: 0.5,
     whitelist: [],
 };
 
@@ -23,7 +24,6 @@ chrome.runtime.onInstalled.addListener(function () {
         ) {
             chrome.storage.sync.set({ "hb-settings": defaultSettings });
         } else {
-            // if there are any new settings, add them to the settings object
             chrome.storage.sync.set({
                 "hb-settings": { ...defaultSettings, ...result["hb-settings"] },
             });
@@ -31,19 +31,57 @@ chrome.runtime.onInstalled.addListener(function () {
     });
 });
 
-const createOffscreenDoc = () => {
-    chrome?.offscreen
-        .createDocument({
-            url: chrome.runtime.getURL("src/offscreen.html"),
+// ============================================================================
+// OFFSCREEN DOCUMENT MANAGEMENT — Fixed to prevent duplicates
+// ============================================================================
+
+let creatingOffscreen = null;
+
+const createOffscreenDoc = async () => {
+    const offscreenUrl = chrome.runtime.getURL("src/offscreen.html");
+
+    // Check if offscreen document already exists (Chrome 116+)
+    if ("getContexts" in chrome.runtime) {
+        const contexts = await chrome.runtime.getContexts({
+            contextTypes: ["OFFSCREEN_DOCUMENT"],
+            documentUrls: [offscreenUrl],
+        });
+        if (contexts.length > 0) {
+            console.log("HB== Offscreen document already exists");
+            return;
+        }
+    }
+
+    // Prevent concurrent creation attempts
+    if (creatingOffscreen) {
+        await creatingOffscreen;
+        return;
+    }
+
+    try {
+        creatingOffscreen = chrome.offscreen.createDocument({
+            url: offscreenUrl,
             reasons: ["DOM_PARSER"],
             justification: "Process Images",
-        })
-        .then((document) => {
-            console.log("offscreen document created");
-        })
-        .finally(() => {});
+        });
+        await creatingOffscreen;
+        console.log("HB== Offscreen document created");
+    } catch (error) {
+        // If error is "already exists", ignore it
+        if (
+            error.message &&
+            error.message.includes("Only a single offscreen")
+        ) {
+            console.log("HB== Offscreen document already exists (caught)");
+        } else {
+            console.error("HB== Error creating offscreen document:", error);
+        }
+    } finally {
+        creatingOffscreen = null;
+    }
 };
 
+// Create on startup
 createOffscreenDoc();
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -69,10 +107,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
         return true;
     } else if (request.type === "reloadExtension") {
-        // kill the offscreen document
-        chrome?.offscreen?.closeDocument();
-        // recreate the offscreen document
-        createOffscreenDoc();
+        // Close and recreate offscreen document
+        chrome?.offscreen
+            ?.closeDocument()
+            .then(() => {
+                createOffscreenDoc();
+            })
+            .catch(() => {
+                // If close fails (maybe already closed), just create
+                createOffscreenDoc();
+            });
     }
 });
 
@@ -99,7 +143,6 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
             });
         }
     }
-
     return true;
 });
 
@@ -109,15 +152,6 @@ chrome.runtime.onInstalled.addListener(function (details) {
         chrome.tabs.create({
             url: "https://onboard.haramblur.com/",
         });
-    } else if (details?.reason === "update") {
-        // const currentVersion = chrome.runtime.getManifest().version;
-        // if (currentVersion == "0.2.4" || currentVersion == "0.2.5") return; // no need to show update page for this version
-        // const previousVersion = details.previousVersion;
-        // if (currentVersion != previousVersion) {
-        // 	chrome.tabs.create({
-        // 		url: "https://update.haramblur.com/",
-        // 	});
-        // }
     }
 });
 

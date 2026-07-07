@@ -1,4 +1,2 @@
 <script src="../tfjs/human.js"></script>
-<!-- Must be FIRST -->
 <script src="offscreen.js" type="module"></script>
-<!-- Must be SECOND -->

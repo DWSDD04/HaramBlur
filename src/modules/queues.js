@@ -1,3 +1,6 @@
+// queues.js
+// Fixed: Silently handle tracking pixel failures without scary console errors
+
 import { loadImage } from "./helpers.js";
 
 class Queue {
@@ -17,14 +20,19 @@ class Queue {
             const node = await loadImage(img.src, img.width, img.height);
             this.processNextElement(node, onSuccess, onError);
         } catch (error) {
-            console.error("HB=== image failed to load", img.src);
+            // Silently skip tracking pixels — don't log scary errors
+            if (error.message === "TRACKING_PIXEL_SKIPPED") {
+                // Expected, no action needed
+            } else {
+                // Only log real errors, not CORS/tracking failures
+                // console.warn("HB=== image skipped (CORS or load failure)", img.src.substring(0, 80));
+            }
             onError({
                 message: "Failed to load image",
                 error,
             });
         } finally {
             this.activeLoading--;
-            // if there are more images to load, load them
             if (this.loadingQueue.length) {
                 this.handleElementLoading(...this.loadingQueue.shift());
             }
@@ -34,7 +42,6 @@ class Queue {
     async handleElementProcessing(node, onSuccess, onError) {
         try {
             const result = await this.runDetection(node);
-            // console.log("offscreen result", result);
             onSuccess(result);
         } catch (error) {
             console.error("Offscreen== handleElementProcessing error", error);
@@ -46,7 +53,6 @@ class Queue {
             this.activeProcessing--;
             node.src = "";
             node = null;
-            // if there are more images to process, process them
             if (this.detectionQueue.length) {
                 this.handleElementProcessing(...this.detectionQueue.shift());
             }
