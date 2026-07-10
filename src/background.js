@@ -1,5 +1,5 @@
 // background.js
-// Fixed: Prevents "Only a single offscreen document may be created" error
+// Fixed: Prevents duplicate context menu and offscreen document errors
 
 const defaultSettings = {
     status: true,
@@ -16,23 +16,8 @@ const defaultSettings = {
     whitelist: [],
 };
 
-chrome.runtime.onInstalled.addListener(function () {
-    chrome.storage.sync.get(["hb-settings"], function (result) {
-        if (
-            result["hb-settings"] === undefined ||
-            result["hb-settings"] === null
-        ) {
-            chrome.storage.sync.set({ "hb-settings": defaultSettings });
-        } else {
-            chrome.storage.sync.set({
-                "hb-settings": { ...defaultSettings, ...result["hb-settings"] },
-            });
-        }
-    });
-});
-
 // ============================================================================
-// OFFSCREEN DOCUMENT MANAGEMENT — Fixed to prevent duplicates
+// OFFSCREEN DOCUMENT MANAGEMENT
 // ============================================================================
 
 let creatingOffscreen = null;
@@ -40,7 +25,6 @@ let creatingOffscreen = null;
 const createOffscreenDoc = async () => {
     const offscreenUrl = chrome.runtime.getURL("src/offscreen.html");
 
-    // Check if offscreen document already exists (Chrome 116+)
     if ("getContexts" in chrome.runtime) {
         const contexts = await chrome.runtime.getContexts({
             contextTypes: ["OFFSCREEN_DOCUMENT"],
@@ -52,7 +36,6 @@ const createOffscreenDoc = async () => {
         }
     }
 
-    // Prevent concurrent creation attempts
     if (creatingOffscreen) {
         await creatingOffscreen;
         return;
@@ -67,7 +50,6 @@ const createOffscreenDoc = async () => {
         await creatingOffscreen;
         console.log("HB== Offscreen document created");
     } catch (error) {
-        // If error is "already exists", ignore it
         if (
             error.message &&
             error.message.includes("Only a single offscreen")
@@ -81,8 +63,54 @@ const createOffscreenDoc = async () => {
     }
 };
 
-// Create on startup
+// ============================================================================
+// INSTALL / UPDATE — Settings, context menu, onboarding
+// ============================================================================
+
+chrome.runtime.onInstalled.addListener(function (details) {
+    // 1. Initialize settings
+    chrome.storage.sync.get(["hb-settings"], function (result) {
+        if (
+            result["hb-settings"] === undefined ||
+            result["hb-settings"] === null
+        ) {
+            chrome.storage.sync.set({ "hb-settings": defaultSettings });
+        } else {
+            chrome.storage.sync.set({
+                "hb-settings": { ...defaultSettings, ...result["hb-settings"] },
+            });
+        }
+    });
+
+    // 2. FIX: Remove all context menus, then create to prevent duplicate ID error
+    chrome.contextMenus.removeAll(() => {
+        chrome.contextMenus.create({
+            id: "enable-detection",
+            title: "Enable for this video",
+            contexts: ["all"],
+            type: "checkbox",
+            enabled: true,
+            checked: true,
+        });
+    });
+
+    // 3. Onboarding on first install
+    if (details?.reason === "install") {
+        chrome.tabs.create({
+            url: "https://onboard.haramblur.com/",
+        });
+    }
+});
+
+// ============================================================================
+// STARTUP — Create offscreen document (service worker wake)
+// ============================================================================
+
 createOffscreenDoc();
+
+// ============================================================================
+// MESSAGE HANDLER
+// ============================================================================
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === "getSettings") {
@@ -92,6 +120,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const isVideoEnabled =
                 result["hb-settings"].status &&
                 result["hb-settings"].blurVideos;
+
             chrome.contextMenus.update("enable-detection", {
                 enabled: isVideoEnabled,
                 checked: isVideoEnabled,
@@ -107,28 +136,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
         return true;
     } else if (request.type === "reloadExtension") {
-        // Close and recreate offscreen document
         chrome?.offscreen
             ?.closeDocument()
             .then(() => {
                 createOffscreenDoc();
             })
             .catch(() => {
-                // If close fails (maybe already closed), just create
                 createOffscreenDoc();
             });
     }
 });
 
-// context menu: "enable detection on this video"
-chrome.contextMenus.create({
-    id: "enable-detection",
-    title: "Enable for this video",
-    contexts: ["all"],
-    type: "checkbox",
-    enabled: true,
-    checked: true,
-});
+// ============================================================================
+// CONTEXT MENU CLICK HANDLER
+// ============================================================================
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
     console.log("HB== context menu clicked", info, tab);
@@ -146,14 +167,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     return true;
 });
 
-// on install, onboarding
-chrome.runtime.onInstalled.addListener(function (details) {
-    if (details?.reason === "install") {
-        chrome.tabs.create({
-            url: "https://onboard.haramblur.com/",
-        });
-    }
-});
+// ============================================================================
+// UNINSTALL
+// ============================================================================
 
-// on uninstall
 chrome.runtime.setUninstallURL("https://forms.gle/RovVrtp29vK3Z7To7");

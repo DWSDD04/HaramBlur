@@ -1,6 +1,3 @@
-// processing2.js
-// Fixed: Better error handling, no scary warnings for expected errors
-
 import {
     calcResize,
     loadVideo,
@@ -9,10 +6,10 @@ import {
     requestIdleCB,
     canvToBlob,
 } from "./helpers";
-import { removeBlurryStart } from "./style";
+import { removeBlurryStart, removeImmediateBlur } from "./style";
 import { STATUSES } from "../constants.js";
 
-const FRAME_RATE = 1000 / 25; // 25 fps
+const FRAME_RATE = 1000 / 25;
 const POSITIVE_THRESHOLD = 1;
 const NEGATIVE_THRESHOLD = 3;
 
@@ -26,9 +23,6 @@ const RESULTS = {
 let activeFrame = false;
 let canv, ctx;
 
-// ============================================================================
-// PROCESS IMAGE — Fixed error handling
-// ============================================================================
 const processImage = (node, STATUSES) => {
     try {
         node.dataset.HBstatus = STATUSES.PROCESSING;
@@ -42,56 +36,54 @@ const processImage = (node, STATUSES) => {
                 },
             },
             (response) => {
+                // Always remove pending blur — final state decided below
+                removeImmediateBlur(node);
                 removeBlurryStart(node);
 
-                // Handle error responses silently (tracking pixels, CORS, etc.)
-                if (!response) {
-                    // No response - probably a tracking pixel or CORS issue
-                    // Don't log error, just mark as processed (no blur)
-                    node.dataset.HBstatus = STATUSES.PROCESSED;
+                // Chrome messaging failure (offscreen not ready, disconnected, etc.)
+                if (chrome.runtime.lastError) {
+                    node.dataset.HBstatus = STATUSES.ERROR;
+                    // Stay blurred — security default
                     return;
                 }
 
-                if (response.type === "error") {
-                    // Expected errors: tracking pixels, CORS blocks, load failures
-                    // Silently mark as processed without blur
-                    node.dataset.HBstatus = STATUSES.PROCESSED;
-                    return;
+                // Normalize every possible response type into a safe, predictable value
+                let result;
+                if (response === false) {
+                    result = false; // explicitly safe
+                } else if (response === "face" || response === "nsfw") {
+                    result = response; // explicitly unsafe
+                } else if (response === "error") {
+                    result = "error"; // load or processing failure
+                } else {
+                    // null, undefined, objects, unexpected strings — treat as error
+                    result = "error";
                 }
 
-                // Handle string results (normal detection)
-                if (response === "face" || response === "nsfw") {
-                    node.dataset.HBstatus = STATUSES.PROCESSED;
+                if (result === "error") {
+                    // Keep blurred — couldn't verify safety
                     node.classList.add("hb-blur");
-                    node.dataset.HBresult = response;
-                } else if (
-                    response === false ||
-                    response === "clear" ||
-                    response === RESULTS.CLEAR
-                ) {
+                    node.dataset.HBstatus = STATUSES.ERROR;
+                } else if (result === false) {
+                    // Safe: unblur
                     node.dataset.HBstatus = STATUSES.PROCESSED;
                     node.classList.remove("hb-blur");
                     delete node.dataset.HBresult;
                 } else {
-                    // Unknown response - log at debug level only
-                    console.debug(
-                        "HB==Unknown response from processing image:",
-                        response
-                    );
+                    // face or nsfw: keep blurred
                     node.dataset.HBstatus = STATUSES.PROCESSED;
+                    node.classList.add("hb-blur");
+                    node.dataset.HBresult = result;
                 }
             }
         );
     } catch (e) {
-        // Silently handle any unexpected errors
-        node.dataset.HBstatus = STATUSES.PROCESSED;
-        removeBlurryStart(node);
+        // Exception in sendMessage — keep blurred
+        node.classList.add("hb-blur");
+        node.dataset.HBstatus = STATUSES.ERROR;
     }
 };
 
-// ============================================================================
-// PROCESS FRAME — Same as before
-// ============================================================================
 const processFrame = async (video, { width, height }) => {
     if (!video || video.ended) {
         return;
@@ -115,6 +107,10 @@ const processFrame = async (video, { width, height }) => {
                 },
                 (response) => {
                     URL.revokeObjectURL(data);
+                    if (chrome.runtime.lastError) {
+                        resolve(null);
+                        return;
+                    }
                     resolve(response);
                 }
             );
@@ -124,9 +120,6 @@ const processFrame = async (video, { width, height }) => {
     });
 };
 
-// ============================================================================
-// VIDEO DETECTION LOOP — Same as before
-// ============================================================================
 const videoDetectionLoop = async (video, { width, height }) => {
     const currTime = performance.now();
 
@@ -139,6 +132,7 @@ const videoDetectionLoop = async (video, { width, height }) => {
     if (video.dataset.HBstatus === STATUSES.DISABLED) {
         video.classList.remove("hb-blur");
     }
+
     if (
         !video.ended &&
         !video.paused &&
@@ -151,20 +145,20 @@ const videoDetectionLoop = async (video, { width, height }) => {
                 if (!activeFrame) {
                     activeFrame = true;
                     processFrame(video, { width, height })
-                        .then(({ result, timestamp }) => {
-                            if (result === "error") {
+                        .then((response) => {
+                            if (!response || response.result === "error") {
                                 throw new Error("HB==Error from processFrame");
                             }
 
-                            if (result === "skipped") {
+                            if (response.result === "skipped") {
                                 return;
                             }
 
-                            if (video.currentTime - timestamp > 0.5) {
+                            if (video.currentTime - response.timestamp > 0.5) {
                                 return;
                             }
 
-                            processVideoDetections(result, video);
+                            processVideoDetections(response.result, video);
                         })
                         .catch((error) => {
                             throw error;
@@ -187,6 +181,7 @@ const videoDetectionLoop = async (video, { width, height }) => {
         video.removeAttribute("crossorigin");
         return;
     }
+
     if (!video.paused) {
         video.HBrafId = requestAnimationFrame(() =>
             videoDetectionLoop(video, { width, height })
@@ -200,19 +195,18 @@ const videoDetectionLoop = async (video, { width, height }) => {
     }
 };
 
-// ============================================================================
-// PROCESS VIDEO — Same as before
-// ============================================================================
 const processVideo = async (node) => {
     try {
         node.dataset.HBstatus = STATUSES.LOADING;
         await loadVideo(node);
         node.dataset.HBstatus = STATUSES.PROCESSING;
+
         const { newWidth, newHeight } = calcResize(
             node.videoWidth ?? node.clientWidth,
             node.videoHeight ?? node.clientHeight,
             "video"
         );
+
         if (!canv) {
             canv = getCanvas(newWidth, newHeight, true);
             ctx = canv.getContext("2d", {
@@ -220,6 +214,7 @@ const processVideo = async (node) => {
                 willReadFrequently: true,
             });
         }
+
         node.width = newWidth;
         node.height = newHeight;
 
@@ -228,19 +223,18 @@ const processVideo = async (node) => {
             canv.height = newHeight;
         }
 
+        removeImmediateBlur(node);
         removeBlurryStart(node);
 
         requestIdleCB(() => {
             videoDetectionLoop(node, { width: newWidth, height: newHeight });
         });
     } catch (e) {
+        // Video load failure — pending blur stays, remains blurred
         console.log("HB== processVideo error", e);
     }
 };
 
-// ============================================================================
-// PROCESS VIDEO DETECTIONS — Same as before
-// ============================================================================
 const processVideoDetections = (result, video) => {
     const prevResult = video.dataset.HBresult;
     const isPrevResultClear = prevResult === RESULTS.CLEAR || !prevResult;

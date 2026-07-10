@@ -1,6 +1,3 @@
-// queues.js
-// Fixed: Silently handle tracking pixel failures without scary console errors
-
 import { loadImage } from "./helpers.js";
 
 class Queue {
@@ -20,17 +17,8 @@ class Queue {
             const node = await loadImage(img.src, img.width, img.height);
             this.processNextElement(node, onSuccess, onError);
         } catch (error) {
-            // Silently skip tracking pixels — don't log scary errors
-            if (error.message === "TRACKING_PIXEL_SKIPPED") {
-                // Expected, no action needed
-            } else {
-                // Only log real errors, not CORS/tracking failures
-                // console.warn("HB=== image skipped (CORS or load failure)", img.src.substring(0, 80));
-            }
-            onError({
-                message: "Failed to load image",
-                error,
-            });
+            // FIX: CORS and load failures are expected — don't spam console
+            onError("error");
         } finally {
             this.activeLoading--;
             if (this.loadingQueue.length) {
@@ -44,11 +32,8 @@ class Queue {
             const result = await this.runDetection(node);
             onSuccess(result);
         } catch (error) {
-            console.error("Offscreen== handleElementProcessing error", error);
-            onError({
-                message: "Failed to process image",
-                error,
-            });
+            // FIX: Send simple error signal instead of object
+            onError("error");
         } finally {
             this.activeProcessing--;
             node.src = "";
@@ -68,7 +53,7 @@ class Queue {
                 this.detectionQueue.push([node, onSuccess, onError]);
             }
         } catch (error) {
-            console.error("Offscreen== processNextElement error", error);
+            onError("error");
         }
     }
 
@@ -81,7 +66,7 @@ class Queue {
                 this.loadingQueue.push([img, onSuccess, onError]);
             }
         } catch (error) {
-            console.error("HB== addToQueue error", error);
+            onError("error");
         }
     }
 }
