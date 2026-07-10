@@ -126,37 +126,44 @@ const calcResize = (width, height, type = "image") => {
 // ============================================================================
 // PROCESS NODE — Skip tracking pixels before they even reach the queue
 // ============================================================================
-const processNode = (node, callBack) => {
-    const imgs = node?.getElementsByTagName?.("img") ?? [];
-    const videos = node?.getElementsByTagName?.("video") ?? [];
-
-    for (let i = 0; i < imgs.length + videos.length; i++) {
-        const node = i < imgs.length ? imgs[i] : videos[i - imgs.length];
-        if (node.tagName === "VIDEO") {
-            callBack(node);
-        } else if (node.tagName === "IMG") {
-            // Skip tracking pixels and tiny images
-            if (node.complete && isImageTooSmall(node) && node.naturalHeight) {
-                // Too small, skip
-            } else if (isTrackingPixel(node.src)) {
-                // Tracking pixel, skip silently
-            } else {
-                callBack(node);
-            }
+// ============================================================================
+// DEEP DOM WALKER — Pierces shadow roots recursively
+// ============================================================================
+const walkDeepNodes = function* (root) {
+    if (!(root instanceof Element) && !(root instanceof ShadowRoot)) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let el;
+    while ((el = walker.nextNode())) {
+        yield el;
+        if (el.shadowRoot) {
+            yield* walkDeepNodes(el.shadowRoot);
         }
-    }
-
-    if (node.tagName === "IMG" || node.tagName === "VIDEO") {
-        if (node.tagName === "IMG" && isTrackingPixel(node.src)) {
-            // Skip tracking pixels at the node level too
-            return;
-        }
-        callBack(node);
     }
 };
 
 // ============================================================================
-// OTHER HELPERS — Same as before
+// PROCESS NODE — Finds all img/video including inside shadow DOM
+// ============================================================================
+const processNode = (node, callBack) => {
+    if (!node) return;
+    for (const el of walkDeepNodes(node)) {
+        if (el.tagName === "VIDEO") {
+            callBack(el);
+        } else if (el.tagName === "IMG") {
+            // Skip tracking pixels and tiny images
+            if (el.complete && isImageTooSmall(el) && el.naturalHeight) {
+                // Too small, skip
+            } else if (isTrackingPixel(el.src)) {
+                // Tracking pixel, skip silently
+            } else {
+                callBack(el);
+            }
+        }
+    }
+};
+
+// ============================================================================
+// OTHER HELPERSPERS — Same as before
 // ============================================================================
 const hasBeenProcessed = (element) => {
     if (!element) throw new Error("No element provided");
@@ -274,6 +281,7 @@ const cancelIdleCB =
     };
 
 export {
+    walkDeepNodes,
     loadImage,
     loadVideo,
     calcResize,

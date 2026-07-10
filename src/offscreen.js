@@ -10,6 +10,19 @@ var settings;
 var queue;
 var detector = new Detector();
 
+// ============================================================================
+// HEARTBEAT — Auto-reload offscreen document if it freezes
+// ============================================================================
+let lastHeartbeat = Date.now();
+
+const heartbeatInterval = setInterval(() => {
+    if (Date.now() - lastHeartbeat > 30000) {
+        console.warn("HB== Offscreen heartbeat stale (>30s), reloading");
+        clearInterval(heartbeatInterval);
+        location.reload();
+    }
+}, 30000);
+
 const loadModels = async () => {
     try {
         await detector.initHuman();
@@ -67,6 +80,8 @@ const handleVideoDetection = async (request, sender, sendResponse) => {
 const startListening = () => {
     settings.listenForChanges();
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        lastHeartbeat = Date.now(); // keepalive on every message
+
         if (request.type === "imageDetection") {
             handleImageDetection(request, sender, sendResponse);
         }
@@ -93,14 +108,13 @@ const runDetection = async (img, isVideo = false) => {
     }
     const predictions = await detector.humanModelClassify(tensor);
     detector.human.tf.dispose(tensor);
-    if (
-        containsGenderFace(
-            predictions,
-            settings.shouldDetectMale(),
-            settings.shouldDetectFemale()
-        )
-    )
-        return "face";
+
+    const genderResult = containsGenderFace(
+        predictions,
+        settings.shouldDetectMale(),
+        settings.shouldDetectFemale()
+    );
+    if (genderResult) return genderResult;
     return false;
 };
 

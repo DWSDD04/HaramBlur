@@ -8,6 +8,8 @@ import {
 } from "./helpers";
 import { removeBlurryStart, removeImmediateBlur } from "./style";
 import { STATUSES } from "../constants.js";
+import { detectionCache, buildCacheKey } from "./cache.js";
+import { applySurgicalBlur, removeSurgicalBlur } from "./surgical.js";
 
 const FRAME_RATE = 1000 / 25;
 const POSITIVE_THRESHOLD = 1;
@@ -23,8 +25,63 @@ const RESULTS = {
 let activeFrame = false;
 let canv, ctx;
 
-const processImage = (node, STATUSES) => {
+/**
+ * Apply a cached result to a DOM node without re-running detection.
+ */
+const applyCachedResult = (node, result, STATUSES, settings) => {
+    removeImmediateBlur(node);
+    removeBlurryStart(node);
+
+    if (result === false) {
+        removeSurgicalBlur(node);
+        node.dataset.HBstatus = STATUSES.PROCESSED;
+        node.classList.remove("hb-blur");
+        delete node.dataset.HBresult;
+    } else if (result === "error") {
+        removeSurgicalBlur(node);
+        node.classList.add("hb-blur");
+        node.dataset.HBstatus = STATUSES.ERROR;
+    } else if (
+        typeof result === "object" &&
+        result !== null &&
+        result.result === "face" &&
+        result.boxes
+    ) {
+        // Surgical blur
+        node.dataset.HBstatus = STATUSES.PROCESSED;
+        node.classList.remove("hb-blur");
+        delete node.dataset.HBresult;
+        const blurAmount = settings?.getBlurAmount?.() ?? 20;
+        const gray = settings?.isGray?.() ?? true;
+        applySurgicalBlur(node, result.boxes, blurAmount, gray);
+    } else {
+        // Full blur fallback (nsfw or face without boxes)
+        removeSurgicalBlur(node);
+        node.dataset.HBstatus = STATUSES.PROCESSED;
+        node.classList.add("hb-blur");
+        node.dataset.HBresult =
+            typeof result === "string" ? result : result.result;
+    }
+};
+
+const processImage = (node, STATUSES, settings = null) => {
     try {
+        // ------------------------------------------------------------------
+        // CACHE CHECK
+        // ------------------------------------------------------------------
+        const strictness = settings?.getStrictness?.() ?? 0.5;
+        const cacheKey = buildCacheKey(
+            node.src,
+            node.naturalWidth || node.width,
+            node.naturalHeight || node.height,
+            strictness
+        );
+        const cached = detectionCache.get(cacheKey);
+        if (cached !== null) {
+            applyCachedResult(node, cached, STATUSES, settings);
+            return;
+        }
+
         node.dataset.HBstatus = STATUSES.PROCESSING;
         chrome.runtime.sendMessage(
             {
@@ -51,6 +108,12 @@ const processImage = (node, STATUSES) => {
                 let result;
                 if (response === false) {
                     result = false; // explicitly safe
+                } else if (
+                    typeof response === "object" &&
+                    response !== null &&
+                    response.result
+                ) {
+                    result = response; // object with result + boxes
                 } else if (response === "face" || response === "nsfw") {
                     result = response; // explicitly unsafe
                 } else if (response === "error") {
@@ -60,21 +123,10 @@ const processImage = (node, STATUSES) => {
                     result = "error";
                 }
 
-                if (result === "error") {
-                    // Keep blurred — couldn't verify safety
-                    node.classList.add("hb-blur");
-                    node.dataset.HBstatus = STATUSES.ERROR;
-                } else if (result === false) {
-                    // Safe: unblur
-                    node.dataset.HBstatus = STATUSES.PROCESSED;
-                    node.classList.remove("hb-blur");
-                    delete node.dataset.HBresult;
-                } else {
-                    // face or nsfw: keep blurred
-                    node.dataset.HBstatus = STATUSES.PROCESSED;
-                    node.classList.add("hb-blur");
-                    node.dataset.HBresult = result;
-                }
+                // Cache the result before applying it
+                detectionCache.set(cacheKey, result);
+
+                applyCachedResult(node, result, STATUSES, settings);
             }
         );
     } catch (e) {

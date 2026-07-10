@@ -8,7 +8,10 @@ class Queue {
         this.activeProcessing = 0;
         this.activeLoading = 0;
         this.maxLoading = 100;
-        this.maxProcessing = 1;
+        // Dynamic concurrency based on hardware cores
+        // Cap at 4 to avoid overwhelming GPU memory
+        const cores = navigator.hardwareConcurrency || 2;
+        this.maxProcessing = Math.min(cores > 4 ? 4 : 2, 4);
         this.runDetection = runDetectionFn;
     }
 
@@ -17,7 +20,7 @@ class Queue {
             const node = await loadImage(img.src, img.width, img.height);
             this.processNextElement(node, onSuccess, onError);
         } catch (error) {
-            // FIX: CORS and load failures are expected — don't spam console
+            // CORS and load failures are expected — don't spam console
             onError("error");
         } finally {
             this.activeLoading--;
@@ -32,12 +35,14 @@ class Queue {
             const result = await this.runDetection(node);
             onSuccess(result);
         } catch (error) {
-            // FIX: Send simple error signal instead of object
+            // Send simple error signal instead of object
             onError("error");
         } finally {
             this.activeProcessing--;
-            node.src = "";
-            node = null;
+            // Best-effort cleanup: drop the src so the Image element can be GC'd
+            if (node && node.src) {
+                node.src = "";
+            }
             if (this.detectionQueue.length) {
                 this.handleElementProcessing(...this.detectionQueue.shift());
             }

@@ -398,9 +398,11 @@ const containsGenderFace = (detections, detectMale, detectFemale) => {
     }
 
     const faces = detections.face;
-    if (detectMale || detectFemale)
-        return faces.some(
-            (face) =>
+    const boxes = [];
+
+    if (detectMale || detectFemale) {
+        for (const face of faces) {
+            if (
                 face.age > 20 &&
                 genderPredicate(
                     face.gender,
@@ -408,8 +410,14 @@ const containsGenderFace = (detections, detectMale, detectFemale) => {
                     detectMale,
                     detectFemale
                 )
-        );
-    else return false;
+            ) {
+                boxes.push(face.box);
+            }
+        }
+    }
+
+    if (!boxes.length) return false;
+    return { result: "face", boxes };
 };
 
 export { getNsfwClasses, containsNsfw, containsGenderFace, Detector };

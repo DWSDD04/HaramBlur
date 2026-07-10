@@ -14,7 +14,97 @@ import { STATUSES } from "../constants.js";
 
 let mutationObserver, _settings;
 let videosInProcess = [];
+let ioObserver = null;
+let shadowObservers = new Map(); // shadowRoot -> MutationObserver
 
+// ============================================================================
+// INTERSECTION OBSERVER — Only process images/videos that enter viewport
+// ============================================================================
+const initIntersectionObserver = () => {
+    ioObserver = new IntersectionObserver(
+        (entries) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                    const node = entry.target;
+                    ioObserver.unobserve(node);
+
+                    if (node.tagName === "IMG") {
+                        processImage(node, STATUSES, _settings);
+                    } else if (node.tagName === "VIDEO") {
+                        processVideo(node, STATUSES);
+                        videosInProcess.push(node);
+                        updateBGvideoStatus(videosInProcess);
+                    }
+                }
+            });
+        },
+        { rootMargin: "300px" } // Start loading slightly before scroll into view
+    );
+};
+
+// ============================================================================
+// SHADOW DOM OBSERVER — Watch for mutations inside shadow roots
+// ============================================================================
+const observeShadowRoot = (shadowRoot) => {
+    if (shadowObservers.has(shadowRoot)) return;
+
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.type === "childList") {
+                mutation.addedNodes.forEach((node) => {
+                    if (
+                        !(node instanceof HTMLElement) ||
+                        node.tagName === "LINK" ||
+                        node.tagName === "STYLE" ||
+                        node.tagName === "SCRIPT" ||
+                        node.tagName === "META"
+                    ) {
+                        return;
+                    }
+                    // Recursively observe nested shadow roots
+                    if (node.shadowRoot) {
+                        observeShadowRoot(node.shadowRoot);
+                    }
+                    processNode(node, (n) => observeNode(n, false));
+                });
+            } else if (
+                mutation.type === "attributes" &&
+                mutation.attributeName === "src"
+            ) {
+                observeNode(mutation.target, true);
+            }
+        });
+    });
+
+    shadowObservers.set(shadowRoot, observer);
+    observer.observe(shadowRoot, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["src"],
+    });
+
+    // Process existing content inside this shadow root immediately
+    processNode(shadowRoot, (n) => observeNode(n, false));
+};
+
+// ============================================================================
+// SCAN FOR EXISTING SHADOW ROOTS
+// ============================================================================
+const scanForShadowRoots = (root = document.documentElement) => {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let el;
+    while ((el = walker.nextNode())) {
+        if (el.shadowRoot) {
+            observeShadowRoot(el.shadowRoot);
+        }
+    }
+};
+
+// ============================================================================
+// MAIN MUTATION OBSERVER
+// ============================================================================
 const startObserving = () => {
     if (!mutationObserver) initMutationObserver();
 
@@ -32,8 +122,7 @@ const initMutationObserver = () => {
         mutations.forEach((mutation) => {
             if (mutation.type === "childList") {
                 mutation.addedNodes.forEach((node) => {
-                    // FIX: Skip non-element nodes and tags that can't contain images/videos
-                    // This also avoids interacting with browser speculation APIs (<link rel="expect">)
+                    // Skip non-element nodes and tags that can't contain images/videos
                     if (
                         !(node instanceof HTMLElement) ||
                         node.tagName === "LINK" ||
@@ -42,6 +131,10 @@ const initMutationObserver = () => {
                         node.tagName === "META"
                     ) {
                         return;
+                    }
+                    // Watch this element's shadow root if it has one
+                    if (node.shadowRoot) {
+                        observeShadowRoot(node.shadowRoot);
                     }
                     processNode(node, (node) => {
                         observeNode(node, false);
@@ -54,6 +147,8 @@ const initMutationObserver = () => {
         });
     });
     startObserving();
+    // Catch shadow roots that were created before the content script loaded
+    scanForShadowRoots();
 };
 
 const attachObserversListener = () => {
@@ -62,6 +157,8 @@ const attachObserversListener = () => {
         if (!_settings.shouldDetect()) {
             mutationObserver?.disconnect();
             mutationObserver = null;
+            shadowObservers.forEach((obs) => obs.disconnect());
+            shadowObservers.clear();
         } else {
             if (!mutationObserver) startObserving();
         }
@@ -71,6 +168,8 @@ const attachObserversListener = () => {
         if (!_settings?.shouldDetect()) {
             mutationObserver?.disconnect();
             mutationObserver = null;
+            shadowObservers.forEach((obs) => obs.disconnect());
+            shadowObservers.clear();
         } else {
             if (!mutationObserver) startObserving();
         }
@@ -107,6 +206,10 @@ const attachObserversListener = () => {
 const killObserver = () => {
     mutationObserver?.disconnect();
     mutationObserver = null;
+    ioObserver?.disconnect();
+    ioObserver = null;
+    shadowObservers.forEach((obs) => obs.disconnect());
+    shadowObservers.clear();
 };
 
 function observeNode(node, srcAttribute) {
@@ -138,16 +241,9 @@ function observeNode(node, srcAttribute) {
     applyImmediateBlur(node);
     node.dataset.HBstatus = STATUSES.OBSERVED;
 
-    if (node.src?.length || sourceChildren > 0) {
-        if (node.tagName === "IMG") processImage(node, STATUSES);
-        else if (node.tagName === "VIDEO") {
-            processVideo(node, STATUSES);
-            videosInProcess.push(node);
-            updateBGvideoStatus(videosInProcess);
-        }
-    } else {
-        delete node.dataset?.HBstatus;
-    }
+    // Only process when the element enters the viewport
+    if (!ioObserver) initIntersectionObserver();
+    ioObserver.observe(node);
 }
 
 export {
